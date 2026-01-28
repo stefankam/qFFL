@@ -6,7 +6,7 @@ python3  -u main.py --dataset=$1 --optimizer=$2  \
             --clients_per_round=10 \
             --batch_size=64 \
             --q=$4 \
-            --model='svm' \
+            --model='resnet18' \
             --sampling=$5  \
             --num_epochs=1 \
             --data_partition_seed=$3 \

@@ -10,7 +10,6 @@ import seaborn as sns
 accuracies = [ 
 "./log_vehicle/qffedavg_samp2_run1_q0_20_test.csv",
 "./log_vehicle/qffedavg_samp2_run1_q5_20_test.csv",
-"./log_vehicle/qffedavg_samp6_run1_q0_20_test.csv"
 ]
 
 flag = "Testing"
@@ -28,10 +27,10 @@ def get_bar_y(filename, num_clients, num_bar=39):
     idx = 0
     for line in open(filename, 'r'):
         accu = float(line.strip())
-        accuracies[idx/num_clients][idx % num_clients] = accu
+        accuracies[idx//num_clients][idx % num_clients] = accu
         for j in range(num_bar):
             if accu > edges[j] and accu <= edges[j+1]:
-                clients[idx/num_clients][j] += 1
+                clients[idx//num_clients][j] += 1
         idx += 1
 
     mean_clients = np.mean(clients, axis=0)

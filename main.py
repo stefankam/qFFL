@@ -3,14 +3,16 @@ import argparse
 import importlib
 import random
 import os
-import tensorflow as tf
 from flearn.utils.model_utils import read_data
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
+tf.logging.set_verbosity(tf.logging.WARN)
 
 # GLOBAL PARAMETERS
 OPTIMIZERS = ['qffedsgd', 'qffedavg', 'afl', 'maml']
 DATASETS = [ 'synthetic', 'vehicle', 'sent140', 'shakespeare',
 'synthetic_iid', 'synthetic_hybrid', 
-'fmnist', 'adult', 'omniglot']   # fmnist: fashion mnist used in the AFL paper
+'fmnist', 'adult', 'omniglot', 'cifar10']  # fmnist: fashion mnist used in the AFL paper
 
 
 MODEL_PARAMS = {
@@ -22,6 +24,7 @@ MODEL_PARAMS = {
     'shakespeare.stacked_lstm': (80, 80, 256), # seq_len, num_class num_hidden
     'synthetic.mclr': (10, ), # num_classes
     'vehicle.svm':(2, ), # num_classes
+    'cifar10.resnet18': (10, ), # num_classes
 }
 
 
@@ -50,11 +53,11 @@ def read_options():
     parser.add_argument('--eval_every',
                     help='evaluate every ____ rounds;',
                     type=int,
-                    default=-1)
+                    default=1)
     parser.add_argument('--clients_per_round',
                     help='number of clients trained per round;',
                     type=int,
-                    default=-1)
+                    default=2)
     parser.add_argument('--batch_size',
                     help='batch size when clients train on data;',
                     type=int,
@@ -74,15 +77,34 @@ def read_options():
     parser.add_argument('--sampling',
                     help='client sampling methods',
                     type=int,
-                    default='5') # uniform sampling + weighted average
+                    choices=[1, 2],
+                    default=1) # uniform sampling + weighted average
     parser.add_argument('--q',
                     help='reweighting factor',
                     type=float,
                     default='0.0') # no weighting, the same as fedavg
+
     parser.add_argument('--output',
                     help='file to save the final accuracy across all devices',
                     type=str,
                     default='output_accu') 
+    parser.add_argument('--checkpoint_dir',
+                    help='directory to save training checkpoints',
+                    type=str,
+                    default='')
+    parser.add_argument('--checkpoint_freq',
+                    help='save checkpoint every N rounds (0 to disable)',
+                    type=int,
+                    default=1)
+    parser.add_argument('--resume_from',
+                    help='checkpoint path or directory to resume from',
+                    type=str,
+                    default='')
+    parser.add_argument('--track_cpu_usage',
+                    help='track max CPU usage each round (Linux /proc)',
+                    type=int,
+                    default=1)
+
     parser.add_argument('--learning_rate_lambda',
                     help='learning rate for lambda in agnostic flearn',
                     type=float,
@@ -90,7 +112,15 @@ def read_options():
     parser.add_argument('--log_interval',
                     help='intervals (how many rounds) to output accuracy distribution (data dependent',
                     type=int,
-                    default=10)
+                    default=1)
+    parser.add_argument('--log_after_round',
+                    help='start logging per-client accuracy after this round',
+                    type=int,
+                    default=0)
+    parser.add_argument('--metrics_npz',
+                    help='path to save metrics inputs for metrics.py',
+                    type=str,
+                    default='')
     parser.add_argument('--data_partition_seed',
                     help='seed for splitting data into train/test/validation',
                     type=int,
@@ -116,8 +146,16 @@ def read_options():
                     type=int,
                     default=0)
 
+
     try: parsed = vars(parser.parse_args())
     except IOError as msg: parser.error(str(msg))
+
+    if parsed['num_rounds'] < 1:
+        parser.error('--num_rounds must be >= 1')
+    if parsed['clients_per_round'] < 1:
+        parser.error('--clients_per_round must be >= 1')
+    if parsed['eval_every'] < 1:
+        parser.error('--eval_every must be >= 1')
 
     # load selected model
     if parsed['dataset'].startswith("synthetic"):  # all synthetic datasets use the same model

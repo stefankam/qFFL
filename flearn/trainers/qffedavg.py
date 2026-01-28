@@ -1,7 +1,7 @@
 import numpy as np
 from tqdm import trange, tqdm
-import tensorflow as tf
-
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior()
 from .fedbase import BaseFedarated
 from flearn.utils.tf_utils import process_grad, cosine_sim, softmax, norm_grad
 from flearn.utils.model_utils import batch_data, gen_batch, gen_epoch
@@ -19,7 +19,7 @@ class Server(BaseFedarated):
         num_clients = len(self.clients)
         pk = np.ones(num_clients) * 1.0 / num_clients
 
-        for i in range(self.num_rounds+1):
+        for i in range(self.start_round, self.num_rounds+1):
             if i % self.eval_every == 0:
                 num_test, num_correct_test = self.test() # have set the latest model for all clients
                 num_train, num_correct_train = self.train_error()  
@@ -27,9 +27,16 @@ class Server(BaseFedarated):
                 tqdm.write('At round {} testing accuracy: {}'.format(i, np.sum(np.array(num_correct_test)) * 1.0 / np.sum(np.array(num_test))))
                 tqdm.write('At round {} training accuracy: {}'.format(i, np.sum(np.array(num_correct_train)) * 1.0 / np.sum(np.array(num_train))))
                 tqdm.write('At round {} validating accuracy: {}'.format(i, np.sum(np.array(num_correct_val)) * 1.0 / np.sum(np.array(num_val))))
-            
-            
-            if i % self.log_interval == 0 and i > int(self.num_rounds/2):                
+                worst, best, variance = self.fairness_stats(num_correct_test, num_test)
+                tqdm.write('At round {} fairness (worst 10% / best 10% / variance): {:.4f} / {:.4f} / {:.6f}'.format(
+                    i, worst, best, variance))
+                test_accuracies = np.divide(np.asarray(num_correct_test), np.asarray(num_test))
+                self.record_round_accuracy(i, test_accuracies)
+                train_accuracies = np.divide(np.asarray(num_correct_train), np.asarray(num_train))
+                if hasattr(self, "record_round_train_accuracy"):
+                    self.record_round_train_accuracy(i, train_accuracies)
+
+            if i % self.log_interval == 0 and i >= self.log_after_round:                
                 test_accuracies = np.divide(np.asarray(num_correct_test), np.asarray(num_test))
                 np.savetxt(self.output + "_" + str(i) + "_test.csv", test_accuracies, delimiter=",")
                 train_accuracies = np.divide(np.asarray(num_correct_train), np.asarray(num_train))
@@ -40,8 +47,16 @@ class Server(BaseFedarated):
             
             indices, selected_clients = self.select_clients(round=i, pk=pk, num_clients=self.clients_per_round)
 
+            prev_cpu = None
+            max_cpu = 0.0
+            if self.track_cpu_usage:
+                prev_cpu = self._read_cpu_times()
+
+
             Deltas = []
             hs = []
+            loss_before = []
+            loss_after = []
 
             selected_clients = selected_clients.tolist()
 
@@ -51,20 +66,43 @@ class Server(BaseFedarated):
                 weights_before = c.get_params()
                 loss = c.get_loss() # compute loss on the whole training data, with respect to the starting point (the global model)
                 soln, stats = c.solve_inner(num_epochs=self.num_epochs, batch_size=self.batch_size)
+                loss_after_round = c.get_loss()
                 new_weights = soln[1]
 
                 # plug in the weight updates into the gradient
                 grads = [(u - v) * 1.0 / self.learning_rate for u, v in zip(weights_before, new_weights)]
                 
                 Deltas.append([np.float_power(loss+1e-10, self.q) * grad for grad in grads])
-                
+                loss_before.append(loss)
+                loss_after.append(loss_after_round)
+
                 # estimation of the local Lipchitz constant
                 hs.append(self.q * np.float_power(loss+1e-10, (self.q-1)) * norm_grad(grads) + (1.0/self.learning_rate) * np.float_power(loss+1e-10, self.q))
 
+                if self.track_cpu_usage and prev_cpu:
+                    current_cpu = self._read_cpu_times()
+                    if current_cpu:
+                        max_cpu = max(max_cpu, self._cpu_usage_percent(prev_cpu, current_cpu))
+                        prev_cpu = current_cpu
+
             # aggregate using the dynamic step-size
             self.latest_model = self.aggregate2(weights_before, Deltas, hs)
+            self.record_round_metrics(i, [c.id for c in selected_clients], loss_before, loss_after)
+            self.save_metrics_npz(i)
 
                     
 
+            if self.track_cpu_usage:
+                end_cpu = self._read_cpu_times()
+                if prev_cpu and end_cpu:
+                    max_cpu = max(max_cpu, self._cpu_usage_percent(prev_cpu, end_cpu))
+                    tqdm.write('At round {} max CPU usage (%): {:.2f}'.format(i, max_cpu))
+                else:
+                    tqdm.write('At round {} max CPU usage (%): unavailable'.format(i))
 
+            if self.checkpoint_freq and i % self.checkpoint_freq == 0:
+                self.save_checkpoint(i)
+
+            if i == self.num_rounds:
+                self.save_metrics_npz()
 
